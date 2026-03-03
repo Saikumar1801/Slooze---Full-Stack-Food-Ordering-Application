@@ -7,9 +7,11 @@ import { fileURLToPath } from "url";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-const db = new Database("slooze.db");
+// Use /tmp for SQLite on Vercel (the only writable directory)
+const dbPath = process.env.NODE_ENV === 'production' ? '/tmp/slooze.db' : 'slooze.db';
+const db = new Database(dbPath);
 
-// Initialize Database
+// Initialize Database Schema
 db.exec(`
   CREATE TABLE IF NOT EXISTS users (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -61,7 +63,7 @@ db.exec(`
   );
 `);
 
-// Seed Data if empty
+// Seed Data
 const userCount = db.prepare("SELECT COUNT(*) as count FROM users").get() as { count: number };
 if (userCount.count === 0) {
   const insertUser = db.prepare("INSERT INTO users (email, password, role, country) VALUES (?, ?, ?, ?)");
@@ -78,199 +80,139 @@ if (userCount.count === 0) {
   insertRestaurant.run("Pizza Palace", "America");
 
   const insertMenu = db.prepare("INSERT INTO menu_items (restaurant_id, name, price) VALUES (?, ?, ?)");
-  // Spice Garden (India)
   insertMenu.run(1, "Paneer Tikka", 250);
   insertMenu.run(1, "Butter Chicken", 350);
-  // Burger Joint (America)
   insertMenu.run(2, "Classic Cheeseburger", 12.99);
   insertMenu.run(2, "Bacon Burger", 14.99);
-  // Tandoori Nights (India)
   insertMenu.run(3, "Chicken Biryani", 300);
   insertMenu.run(3, "Dal Makhani", 200);
-  // Pizza Palace (America)
   insertMenu.run(4, "Pepperoni Pizza", 18.99);
   insertMenu.run(4, "Veggie Pizza", 16.99);
 }
 
-async function startServer() {
-  const app = express();
-  const PORT = 3000;
+const app = express();
+app.use(express.json());
 
-  app.use(express.json());
-
-  // Middleware to get user from header
-  app.use((req, res, next) => {
-    const userId = req.headers["x-user-id"];
-    if (userId) {
-      const user = db.prepare("SELECT * FROM users WHERE id = ?").get(userId);
-      (req as any).user = user;
-    }
-    next();
-  });
-
-  // Auth API
-  app.post("/api/login", (req, res) => {
-    const { email, password } = req.body;
-    const user = db.prepare("SELECT * FROM users WHERE email = ? AND password = ?").get(email, password);
-    if (user) {
-      res.json(user);
-    } else {
-      res.status(401).json({ error: "Invalid credentials" });
-    }
-  });
-
-  // Restaurants API (Country Restricted)
-  app.get("/api/restaurants", (req, res) => {
-    const user = (req as any).user;
-    if (!user) return res.status(401).json({ error: "Unauthorized" });
-
-    let restaurants;
-    if (user.role === 'Admin') {
-        // Admin can see all? Or still restricted? 
-        // "restricts users to operate only within their assigned country"
-        // Usually Admin might see all, but let's follow the restriction strictly.
-        restaurants = db.prepare("SELECT * FROM restaurants WHERE country = ?").all(user.country);
-    } else {
-        restaurants = db.prepare("SELECT * FROM restaurants WHERE country = ?").all(user.country);
-    }
-    res.json(restaurants);
-  });
-
-  app.get("/api/restaurants/:id/menu", (req, res) => {
-    const menu = db.prepare("SELECT * FROM menu_items WHERE restaurant_id = ?").all(req.params.id);
-    res.json(menu);
-  });
-
-  // Orders API
-  app.post("/api/orders", (req, res) => {
-    const user = (req as any).user;
-    if (!user) return res.status(401).json({ error: "Unauthorized" });
-
-    const { items, totalAmount, status } = req.body;
-    
-    // Only Admin/Manager can set status to 'Paid' initially (Checkout & Pay feature)
-    const initialStatus = (status === 'Paid' && (user.role === 'Admin' || user.role === 'Manager')) ? 'Paid' : 'Pending';
-
-    const info = db.prepare("INSERT INTO orders (user_id, status, total_amount) VALUES (?, ?, ?)")
-      .run(user.id, initialStatus, totalAmount);
-    
-    const orderId = info.lastInsertRowid;
-    const insertItem = db.prepare("INSERT INTO order_items (order_id, menu_item_id, quantity, price) VALUES (?, ?, ?, ?)");
-    
-    for (const item of items) {
-      insertItem.run(orderId, item.id, item.quantity, item.price);
-    }
-
-    res.json({ id: orderId, status: initialStatus });
-  });
-
-  app.get("/api/orders", (req, res) => {
-    const user = (req as any).user;
-    if (!user) return res.status(401).json({ error: "Unauthorized" });
-
-    let orders;
-    if (user.role === 'Admin' || user.role === 'Manager') {
-      // Admins and Managers see all orders in their country
-      orders = db.prepare(`
-        SELECT o.*, u.email as user_email 
-        FROM orders o 
-        JOIN users u ON o.user_id = u.id 
-        WHERE u.country = ? 
-        ORDER BY o.created_at DESC
-      `).all(user.country);
-    } else {
-      // Members only see their own orders
-      orders = db.prepare("SELECT * FROM orders WHERE user_id = ? ORDER BY created_at DESC").all(user.id);
-    }
-    res.json(orders);
-  });
-
-  app.post("/api/orders/:id/pay", (req, res) => {
-    const user = (req as any).user;
-    if (!user || (user.role !== 'Admin' && user.role !== 'Manager')) {
-      return res.status(403).json({ error: "Forbidden: Only Admin or Manager can pay" });
-    }
-
-    // Check country restriction: Manager/Admin can only pay for orders in their country
-    const order = db.prepare(`
-      SELECT o.*, u.country 
-      FROM orders o 
-      JOIN users u ON o.user_id = u.id 
-      WHERE o.id = ?
-    `).get(req.params.id) as any;
-
-    if (!order) return res.status(404).json({ error: "Order not found" });
-    if (order.country !== user.country) {
-      return res.status(403).json({ error: "Forbidden: Cannot operate on orders from another country" });
-    }
-
-    db.prepare("UPDATE orders SET status = 'Paid' WHERE id = ?").run(req.params.id);
-    res.json({ success: true });
-  });
-
-  app.post("/api/orders/:id/cancel", (req, res) => {
-    const user = (req as any).user;
-    if (!user || (user.role !== 'Admin' && user.role !== 'Manager')) {
-      return res.status(403).json({ error: "Forbidden: Only Admin or Manager can cancel" });
-    }
-
-    // Check country restriction
-    const order = db.prepare(`
-      SELECT o.*, u.country 
-      FROM orders o 
-      JOIN users u ON o.user_id = u.id 
-      WHERE o.id = ?
-    `).get(req.params.id) as any;
-
-    if (!order) return res.status(404).json({ error: "Order not found" });
-    if (order.country !== user.country) {
-      return res.status(403).json({ error: "Forbidden: Cannot operate on orders from another country" });
-    }
-
-    db.prepare("UPDATE orders SET status = 'Cancelled' WHERE id = ?").run(req.params.id);
-    res.json({ success: true });
-  });
-
-  // Payment Methods API (Admin Only)
-  app.get("/api/payment-methods", (req, res) => {
-    const user = (req as any).user;
-    if (!user || user.role !== 'Admin') {
-      return res.status(403).json({ error: "Forbidden: Admin only" });
-    }
-
-    const methods = db.prepare("SELECT * FROM payment_methods WHERE user_id = ?").all(user.id);
-    res.json(methods);
-  });
-
-  app.post("/api/payment-methods", (req, res) => {
-    const user = (req as any).user;
-    if (!user || user.role !== 'Admin') {
-      return res.status(403).json({ error: "Forbidden: Admin only" });
-    }
-
-    const { type, details } = req.body;
-    db.prepare("INSERT INTO payment_methods (user_id, type, details) VALUES (?, ?, ?)")
-      .run(user.id, type, details);
-    res.json({ success: true });
-  });
-
-  // Vite middleware for development
-  if (process.env.NODE_ENV !== "production") {
-    const vite = await createViteServer({
-      server: { middlewareMode: true },
-      appType: "spa",
-    });
-    app.use(vite.middlewares);
-  } else {
-    app.use(express.static(path.join(__dirname, "dist")));
-    app.get("*", (req, res) => {
-      res.sendFile(path.join(__dirname, "dist", "index.html"));
-    });
+// Middleware to get user from header
+app.use((req, res, next) => {
+  const userId = req.headers["x-user-id"];
+  if (userId) {
+    const user = db.prepare("SELECT * FROM users WHERE id = ?").get(userId);
+    (req as any).user = user;
   }
+  next();
+});
 
+// API Routes
+app.post("/api/login", (req, res) => {
+  const { email, password } = req.body;
+  const user = db.prepare("SELECT * FROM users WHERE email = ? AND password = ?").get(email, password);
+  if (user) {
+    res.json(user);
+  } else {
+    res.status(401).json({ error: "Invalid credentials" });
+  }
+});
+
+app.get("/api/restaurants", (req, res) => {
+  const user = (req as any).user;
+  if (!user) return res.status(401).json({ error: "Unauthorized" });
+  const restaurants = db.prepare("SELECT * FROM restaurants WHERE country = ?").all(user.country);
+  res.json(restaurants);
+});
+
+app.get("/api/restaurants/:id/menu", (req, res) => {
+  const menu = db.prepare("SELECT * FROM menu_items WHERE restaurant_id = ?").all(req.params.id);
+  res.json(menu);
+});
+
+app.post("/api/orders", (req, res) => {
+  const user = (req as any).user;
+  if (!user) return res.status(401).json({ error: "Unauthorized" });
+  const { items, totalAmount, status } = req.body;
+  const initialStatus = (status === 'Paid' && (user.role === 'Admin' || user.role === 'Manager')) ? 'Paid' : 'Pending';
+  const info = db.prepare("INSERT INTO orders (user_id, status, total_amount) VALUES (?, ?, ?)")
+    .run(user.id, initialStatus, totalAmount);
+  const orderId = info.lastInsertRowid;
+  const insertItem = db.prepare("INSERT INTO order_items (order_id, menu_item_id, quantity, price) VALUES (?, ?, ?, ?)");
+  for (const item of items) {
+    insertItem.run(orderId, item.id, item.quantity, item.price);
+  }
+  res.json({ id: orderId, status: initialStatus });
+});
+
+app.get("/api/orders", (req, res) => {
+  const user = (req as any).user;
+  if (!user) return res.status(401).json({ error: "Unauthorized" });
+  let orders;
+  if (user.role === 'Admin' || user.role === 'Manager') {
+    orders = db.prepare(`
+      SELECT o.*, u.email as user_email 
+      FROM orders o 
+      JOIN users u ON o.user_id = u.id 
+      WHERE u.country = ? 
+      ORDER BY o.created_at DESC
+    `).all(user.country);
+  } else {
+    orders = db.prepare("SELECT * FROM orders WHERE user_id = ? ORDER BY created_at DESC").all(user.id);
+  }
+  res.json(orders);
+});
+
+app.post("/api/orders/:id/pay", (req, res) => {
+  const user = (req as any).user;
+  if (!user || (user.role !== 'Admin' && user.role !== 'Manager')) return res.status(403).json({ error: "Forbidden" });
+  const order = db.prepare("SELECT o.*, u.country FROM orders o JOIN users u ON o.user_id = u.id WHERE o.id = ?").get(req.params.id) as any;
+  if (!order || order.country !== user.country) return res.status(403).json({ error: "Forbidden" });
+  db.prepare("UPDATE orders SET status = 'Paid' WHERE id = ?").run(req.params.id);
+  res.json({ success: true });
+});
+
+app.post("/api/orders/:id/cancel", (req, res) => {
+  const user = (req as any).user;
+  if (!user || (user.role !== 'Admin' && user.role !== 'Manager')) return res.status(403).json({ error: "Forbidden" });
+  const order = db.prepare("SELECT o.*, u.country FROM orders o JOIN users u ON o.user_id = u.id WHERE o.id = ?").get(req.params.id) as any;
+  if (!order || order.country !== user.country) return res.status(403).json({ error: "Forbidden" });
+  db.prepare("UPDATE orders SET status = 'Cancelled' WHERE id = ?").run(req.params.id);
+  res.json({ success: true });
+});
+
+app.get("/api/payment-methods", (req, res) => {
+  const user = (req as any).user;
+  if (!user || user.role !== 'Admin') return res.status(403).json({ error: "Forbidden" });
+  const methods = db.prepare("SELECT * FROM payment_methods WHERE user_id = ?").all(user.id);
+  res.json(methods);
+});
+
+app.post("/api/payment-methods", (req, res) => {
+  const user = (req as any).user;
+  if (!user || user.role !== 'Admin') return res.status(403).json({ error: "Forbidden" });
+  const { type, details } = req.body;
+  db.prepare("INSERT INTO payment_methods (user_id, type, details) VALUES (?, ?, ?)")
+    .run(user.id, type, details);
+  res.json({ success: true });
+});
+
+// Vite / Static Serving
+if (process.env.NODE_ENV !== "production") {
+  const vite = await createViteServer({
+    server: { middlewareMode: true },
+    appType: "spa",
+  });
+  app.use(vite.middlewares);
+} else {
+  app.use(express.static(path.join(__dirname, "dist")));
+  app.get("*", (req, res) => {
+    res.sendFile(path.join(__dirname, "dist", "index.html"));
+  });
+}
+
+// Start server only in local development
+if (process.env.NODE_ENV !== "production") {
+  const PORT = 3000;
   app.listen(PORT, "0.0.0.0", () => {
     console.log(`Server running on http://localhost:${PORT}`);
   });
 }
 
-startServer();
+export default app;
