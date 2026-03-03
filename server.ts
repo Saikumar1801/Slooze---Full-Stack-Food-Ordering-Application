@@ -7,9 +7,9 @@ import { fileURLToPath } from "url";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
-// Use /tmp for SQLite on Vercel (the only writable directory)
-const dbPath = process.env.NODE_ENV === 'production' ? '/tmp/slooze.db' : 'slooze.db';
-const db = new Database(dbPath);
+// Use in-memory database for Vercel to avoid filesystem issues
+// For local dev, we still use the file for persistence
+const db = new Database(process.env.NODE_ENV === 'production' ? ':memory:' : 'slooze.db');
 
 // Initialize Database Schema
 db.exec(`
@@ -97,8 +97,12 @@ app.use(express.json());
 app.use((req, res, next) => {
   const userId = req.headers["x-user-id"];
   if (userId) {
-    const user = db.prepare("SELECT * FROM users WHERE id = ?").get(userId);
-    (req as any).user = user;
+    try {
+      const user = db.prepare("SELECT * FROM users WHERE id = ?").get(userId);
+      (req as any).user = user;
+    } catch (e) {
+      console.error("DB Error:", e);
+    }
   }
   next();
 });
@@ -106,11 +110,15 @@ app.use((req, res, next) => {
 // API Routes
 app.post("/api/login", (req, res) => {
   const { email, password } = req.body;
-  const user = db.prepare("SELECT * FROM users WHERE email = ? AND password = ?").get(email, password);
-  if (user) {
-    res.json(user);
-  } else {
-    res.status(401).json({ error: "Invalid credentials" });
+  try {
+    const user = db.prepare("SELECT * FROM users WHERE email = ? AND password = ?").get(email, password);
+    if (user) {
+      res.json(user);
+    } else {
+      res.status(401).json({ error: "Invalid credentials" });
+    }
+  } catch (e) {
+    res.status(500).json({ error: "Database error" });
   }
 });
 
