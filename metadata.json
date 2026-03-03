@@ -1,0 +1,5 @@
+{
+  "name": "Slooze",
+  "description": "Full-stack role-based food ordering app with RBAC and country-based restrictions.",
+  "requestFramePermissions": []
+}
