@@ -1,6 +1,6 @@
-# Slooze - Full-Stack Food Ordering Application
+# ByteBite - Full-Stack Food Ordering Application
 
-Slooze is a role-based food ordering platform built as a take-home challenge. It features a robust Role-Based Access Control (RBAC) system and country-specific data isolation.
+ByteBite is a role-based food ordering platform built as a take-home challenge. It features a robust Role-Based Access Control (RBAC) system and country-specific data isolation.
 
 ## 🚀 Getting Started
 
@@ -28,7 +28,7 @@ Follow these steps to run the application on your local machine.
 2. **Open your browser**:
    Navigate to `http://localhost:3000`
 
-The application uses an SQLite database (`slooze.db`) which is automatically initialized and seeded with demo data on the first run.
+The application uses an SQLite database (`ByteBite.db`) which is automatically initialized and seeded with demo data on the first run.
 
 ## 🔑 Demo Accounts
 
@@ -36,10 +36,10 @@ Use these accounts to test the different roles and country restrictions. All acc
 
 | Role | Email | Country |
 | :--- | :--- | :--- |
-| **Admin** | `admin@slooze.com` | India |
-| **Manager** | `manager_in@slooze.com` | India |
-| **Member** | `member_in@slooze.com` | India |
-| **Member** | `member_us@slooze.com` | America |
+| **Admin** | `admin@ByteBite.com` | India |
+| **Manager** | `manager_in@ByteBite.com` | India |
+| **Member** | `member_in@ByteBite.com` | India |
+| **Member** | `member_us@ByteBite.com` | America |
 
 ## ✨ Features & RBAC
 
